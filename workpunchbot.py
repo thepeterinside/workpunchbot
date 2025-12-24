@@ -22,7 +22,7 @@ if not BOT_TOKEN:
     print("  export BOT_TOKEN='your-bot-token-here'")
     exit(1)
 
-ADMIN_IDS = {7549969661, 5508742157}  # multiple admins
+ADMIN_IDS = {7549969661, 5508742157, 6594233978}  # multiple admins
 
 CHECK_INTERVAL = 60  # seconds
 
