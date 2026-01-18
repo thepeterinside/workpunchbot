@@ -1,9 +1,10 @@
-import os
 import time
-from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
-)
+import json
+import os
+from datetime import datetime, timedelta, time as dtime
+import pytz
+
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,17 +15,15 @@ from telegram.ext import (
 
 # ================= CONFIG =================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = "8407516624:AAFchTuuLT8UsGVRUqj7VhaG3sGEYjEg39g"
 
-if not BOT_TOKEN:
-    print("❌ ERROR: BOT_TOKEN environment variable is not set!")
-    print("Please set it using:")
-    print("  export BOT_TOKEN='your-bot-token-here'")
-    exit(1)
-
-ADMIN_IDS = {7549969661, 5508742157, 6594233978}  # multiple admins
+ADMIN_IDS = {6047103658}  # Replace with actual admin Telegram user IDs
 
 CHECK_INTERVAL = 60  # seconds
+
+DATA_FILE = "users_data.json"
+
+EST = pytz.timezone("US/Eastern")
 
 ACTIVITIES = {
     "🚽 Toilet (厕所)": {"limit": 10 * 60, "max": 3},
@@ -37,6 +36,25 @@ ACTIVITIES = {
 
 users = {}
 
+# ================= PERSISTENCE =================
+
+def save_users():
+    with open(DATA_FILE, "w") as f:
+        json.dump(users, f)
+
+def load_users():
+    global users
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                users = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            # File is empty or invalid → start fresh
+            users = {}
+    else:
+        users = {}
+
+
 # ================= HELPERS =================
 
 def format_seconds(sec):
@@ -46,22 +64,11 @@ def format_seconds(sec):
     return f"{h}:{m:02}:{s:02}" if h else f"{m}:{s:02}"
 
 def keyboard():
-    # List of activity buttons
     activity_buttons = list(ACTIVITIES.keys())
-    
-    # Split into pairs for two buttons per row
     rows = [activity_buttons[i:i+2] for i in range(0, len(activity_buttons), 2)]
-    
-    # Add Start/Off buttons on the first row
     buttons = [["🟢 Start 开始", "🔴 OFF 下班"]] + rows
-    
-    # Add Back button at the bottom row
     buttons.append(["🔙 Back to Seat"])
-    
-    return ReplyKeyboardMarkup(
-        buttons,
-        resize_keyboard=True
-    )
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 def get_user(uid, name):
     if uid not in users:
@@ -74,24 +81,17 @@ def get_user(uid, name):
             "counts": {k: 0 for k in ACTIVITIES},
             "leisure": 0,
         }
+        save_users()
     return users[uid]
 
-# ================= CORE HANDLERS =================
+# ================= HANDLERS =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Initialize the bot and show keyboard."""
     user = update.effective_user
     get_user(user.id, user.full_name)
-    
-    welcome_text = (
-        "👋 Work Punch Bot Ready!\n\n"
-        "Use the buttons below to track your work activities.\n"
-        "The buttons will remain visible for easy access."
-    )
-    
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=welcome_text,
+
+    await update.message.reply_text(
+        "👋 Work Punch Bot Ready!",
         reply_markup=keyboard()
     )
 
@@ -100,56 +100,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     data = get_user(user.id, user.full_name)
 
-    chat_id = update.effective_chat.id
-
-    # ------------------ Start Work ------------------
+    # -------- START WORK --------
     if text == "🟢 Start 开始":
         if data["working"]:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ You have already started work.",
-                reply_markup=keyboard()
-            )
+            await update.message.reply_text("⚠️ You already started work.", reply_markup=keyboard())
             return
 
         data["working"] = True
         data["start_work"] = time.time()
         data["current"] = None
         data["start_ts"] = None
-        # Reset daily counts if starting a new work day
-        if data["counts"][list(ACTIVITIES.keys())[0]] > 0:
-            data["counts"] = {k: 0 for k in ACTIVITIES}
-            data["leisure"] = 0
+        save_users()
 
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="✅ Work started. You can now track your activities.",
-            reply_markup=keyboard()
-        )
+        await update.message.reply_text("✅ Work started.", reply_markup=keyboard())
 
-    # ------------------ Activity Buttons ------------------
+    # -------- ACTIVITY --------
     elif text in ACTIVITIES:
         if not data["working"]:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ Please start work first by clicking '🟢 Start 开始'",
-                reply_markup=keyboard()
-            )
+            await update.message.reply_text("⚠️ Please start work first.", reply_markup=keyboard())
             return
 
         if data["counts"][text] >= ACTIVITIES[text]["max"]:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"⚠️ You have reached the maximum allowed times for {text} today ({ACTIVITIES[text]['max']}).",
-                reply_markup=keyboard()
-            )
+            await update.message.reply_text("⚠️ Activity limit reached.", reply_markup=keyboard())
             return
 
-        if data["current"] is not None:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"⚠️ You are already on: {data['current']}\n"
-                     f"Please click '🔙 Back to Seat' before starting a new activity.",
+        if data["current"]:
+            await update.message.reply_text(
+                f"⚠️ You are already on {data['current']}.",
                 reply_markup=keyboard()
             )
             return
@@ -157,73 +134,65 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data["current"] = text
         data["start_ts"] = time.time()
         data["counts"][text] += 1
+        save_users()
 
-        limit_minutes = ACTIVITIES[text]["limit"] // 60
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"⏳ Started: {text}\nTime limit: {limit_minutes} minutes\nClick '🔙 Back to Seat' when you return.",
+        await update.message.reply_text(
+            f"⏳ Started {text}.",
             reply_markup=keyboard()
         )
 
-    # ------------------ Back to Seat ------------------
+    # -------- BACK TO SEAT --------
     elif text == "🔙 Back to Seat":
         if not data["working"]:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ You haven't started work yet.",
-                reply_markup=keyboard()
-            )
+            await update.message.reply_text("⚠️ Work not started.", reply_markup=keyboard())
             return
 
-        if data["current"] is None:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="ℹ️ You are already at your seat.",
-                reply_markup=keyboard()
-            )
+        if not data["current"]:
+            await update.message.reply_text("ℹ️ Already on seat.", reply_markup=keyboard())
             return
 
-        now = time.time()
-        elapsed = int(now - data["start_ts"])
+        elapsed = int(time.time() - data["start_ts"])
         limit = ACTIVITIES[data["current"]]["limit"]
         status = "✅ On Time" if elapsed <= limit else "⛔ Delayed"
 
         data["leisure"] += elapsed
+        current_activity = data["current"]
+        data["current"] = None
+        data["start_ts"] = None
+        save_users()
 
+        # --- Restored report format ---
         report = (
             f"📊 Activity Report\n"
             f"----------------------\n"
-            f"👤 {data['name']}\n"
-            f"🎯 Activity: {data['current']}\n"
+            f"👤 Employee: {data['name']}\n"
+            f"🎯 Activity: {current_activity}\n"
             f"⏱️ Duration: {format_seconds(elapsed)}\n"
             f"📌 Status: {status}\n"
             f"----------------------\n"
         )
-
         for k in ACTIVITIES:
-            activity_name = k.split()[1]
+            activity_name = k.split()[1]  # Chinese part removed for display consistency
             report += f"• {activity_name}: {data['counts'][k]}/day\n"
 
         report += f"📈 Total Leisure Today: {format_seconds(data['leisure'])}\n"
-        report += f"----------------------"
+        report += "----------------------"
 
-        data["current"] = None
-        data["start_ts"] = None
+        await update.message.reply_text(report, reply_markup=keyboard())
 
-        await context.bot.send_message(chat_id=chat_id, text=report, reply_markup=keyboard())
-
-    # ------------------ Off Work ------------------
+    # -------- OFF WORK --------
     elif text == "🔴 OFF 下班":
         if not data["working"]:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ You haven't started work yet.",
-                reply_markup=keyboard()
-            )
+            await update.message.reply_text("⚠️ Work not started.", reply_markup=keyboard())
             return
 
         total_work = int(time.time() - data["start_work"])
+        data["working"] = False
+        data["current"] = None
+        data["start_ts"] = None
+        save_users()
 
+        # --- Restored report format ---
         report = (
             f"📊 End of Work Report\n"
             f"----------------------\n"
@@ -232,96 +201,104 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 Total Leisure: {format_seconds(data['leisure'])}\n"
             f"----------------------\n"
         )
-
         for k in ACTIVITIES:
             activity_name = k.split()[1]
             report += f"• {activity_name}: {data['counts'][k]} times\n"
+        report += "----------------------\n"
+        report += "✅ Work session ended. Goodbye!"
 
-        report += f"----------------------\n✅ Work session ended. Goodbye!"
+        await update.message.reply_text(report, reply_markup=keyboard())
 
-        data["working"] = False
-        data["current"] = None
-        data["start_ts"] = None
-
-        await context.bot.send_message(chat_id=chat_id, text=report, reply_markup=keyboard())
-
-
-# ================= ADMIN VIEW =================
+# ================= ADMIN =================
 
 async def admin_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
 
-    lines = ["👀 *Admin Live View*\n"]
+    lines = ["👀 Admin Live View\n"]
 
     for data in users.values():
-        name = data["name"]
-
         if not data["working"]:
-            status = "⛔ Off Work"
-        elif data["current"] is None:
+            status = "⛔ Off"
+        elif not data["current"]:
             status = "🟢 On Seat"
         else:
             elapsed = int(time.time() - data["start_ts"])
-            limit = ACTIVITIES[data["current"]]["limit"]
-            emoji = "⚠️" if elapsed > limit else "🔴"
-            status = f"{emoji} {data['current']} ({format_seconds(elapsed)})"
+            status = f"⚠️ {data['current']} ({format_seconds(elapsed)})"
 
-        lines.append(f"• {name}: {status}")
+        lines.append(f"{data['name']}: {status}")
 
     await context.bot.send_message(
         chat_id=update.effective_user.id,
         text="\n".join(lines)
     )
 
-
-# ================= AUTO FORGOT CHECK =================
+# ================= AUTO CHECK =================
 
 async def auto_check(context: ContextTypes.DEFAULT_TYPE):
     now = time.time()
-    for uid, data in users.items():
+    for data in users.values():
         if data["current"]:
             elapsed = now - data["start_ts"]
             limit = ACTIVITIES[data["current"]]["limit"]
-
             if elapsed > limit:
-                # Notify all admins without resetting status
-                for admin_id in ADMIN_IDS:
+                for admin in ADMIN_IDS:
                     try:
                         await context.bot.send_message(
-                            chat_id=admin_id,
-                            text=(
-                                f"⚠️ Delay-status: Employee: {data['name']} "
-                                f"is delayed to get back to his seat.\n"
-                                f"He has been on '{data['current']}' for {format_seconds(int(elapsed))}."
-                            )
+                            chat_id=admin,
+                            text=f"⚠️ {data['name']} delayed on {data['current']} ({format_seconds(int(elapsed))})"
                         )
                     except:
                         pass
 
+# ================= DAILY RESET =================
+
+async def daily_reset(context: ContextTypes.DEFAULT_TYPE):
+    for data in users.values():
+        data["working"] = False
+        data["current"] = None
+        data["start_ts"] = None
+        data["start_work"] = None
+        data["counts"] = {k: 0 for k in ACTIVITIES}
+        data["leisure"] = 0
+
+    save_users()
+
+    for admin in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin,
+                text="🕛 Daily reset completed (12:00 AM EST)."
+            )
+        except:
+            pass
 
 # ================= MAIN =================
 
 def main():
+    load_users()
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin_today", admin_today))
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message
-        )
-    )
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     app.job_queue.run_repeating(auto_check, interval=CHECK_INTERVAL)
 
-    print("✅ Work Punch Bot Running...")
-    print("⚠️ IMPORTANT: Make sure bot privacy is OFF in @BotFather")
-    print("   Command: /setprivacy -> Disable")
-    app.run_polling()
+    now = datetime.now(EST)
+    midnight = datetime.combine(now.date(), dtime(0, 0), tzinfo=EST)
+    if now >= midnight:
+        midnight += timedelta(days=1)
 
+    app.job_queue.run_repeating(
+        daily_reset,
+        interval=86400,
+        first=(midnight - now).total_seconds()
+    )
+
+    print("✅ Work Punch Bot Running")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
